@@ -1,7 +1,9 @@
 package pl.santander.apigateway.filters;
 
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import groovy.util.logging.Slf4j;
-import org.bouncycastle.util.Strings;
 import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.NettyWriteResponseFilter;
@@ -11,7 +13,6 @@ import org.springframework.cloud.gateway.filter.factory.rewrite.CachedBodyOutput
 import org.springframework.cloud.gateway.filter.factory.rewrite.MessageBodyDecoder;
 import org.springframework.cloud.gateway.filter.factory.rewrite.MessageBodyEncoder;
 import org.springframework.cloud.gateway.support.BodyInserterContext;
-import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
@@ -24,6 +25,7 @@ import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.server.HandlerStrategies;
 import org.springframework.web.server.ServerWebExchange;
+import pl.santander.apigateway.dto.JsonRoot;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -31,50 +33,46 @@ import reactor.core.scheduler.Schedulers;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static java.util.function.Function.identity;
 import static org.springframework.cloud.gateway.support.ServerWebExchangeUtils.ORIGINAL_RESPONSE_CONTENT_TYPE_ATTR;
 
-@Slf4j
 @Component
-public class DynamicPostTransformFilter
-        extends AbstractGatewayFilterFactory<DynamicPostTransformFilter.Config> {
+@Slf4j
+public class ModifyResponseFilter extends AbstractGatewayFilterFactory<ModifyResponseFilter.Config> {
 
     private final Map<String, MessageBodyDecoder> messageBodyDecoders;
     private final Map<String, MessageBodyEncoder> messageBodyEncoders;
 
-    public DynamicPostTransformFilter(Set<MessageBodyDecoder> messageBodyDecoders,
-                                      Set<MessageBodyEncoder> messageBodyEncoders) {
+    private ObjectMapper objectMapper;
+
+    public ModifyResponseFilter(Set<MessageBodyDecoder> messageBodyDecoders,
+                                Set<MessageBodyEncoder> messageBodyEncoders) {
         super(Config.class);
         this.messageBodyDecoders = messageBodyDecoders.stream()
                 .collect(Collectors.toMap(MessageBodyDecoder::encodingType, identity()));
         this.messageBodyEncoders = messageBodyEncoders.stream()
                 .collect(Collectors.toMap(MessageBodyEncoder::encodingType, identity()));
+        objectMapper = new ObjectMapper();
     }
 
-    protected String applyTransform(String input, Config config) {
+    protected String applyTransform(String input, ModifyResponseFilter.Config config) {
         // we're not doing anything fancy here
         return input.toUpperCase();
     }
 
     @Override
     public GatewayFilter apply(Config config) {
-        // see this gist for the discussion: https://gist.github.com/WeirdBob/b25569d461f0f54444d2c0eab51f3c48
-        // also see: https://levelup.gitconnected.com/spring-cloud-gateway-encryption-decryption-of-request-response-4e76f5b15718
-        // this is basically a modification of ModifyResponseBodyGatewayFilterFactory
         return new OrderedGatewayFilter((exchange, chain) -> {
             ServerHttpResponse originalResponse = exchange.getResponse();
-            DataBufferFactory bufferFactory = originalResponse.bufferFactory();
             ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
-
                 @SuppressWarnings("unchecked")
                 @Override
                 public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
 
-                    Class inClass = String.class;
-                    Class outClass = String.class;
+                    Class<String> inClass = String.class;
+                    Class<JsonRoot> outClass = JsonRoot.class;
 
                     String originalResponseContentType = exchange.getAttribute(ORIGINAL_RESPONSE_CONTENT_TYPE_ATTR);
                     HttpHeaders httpHeaders = new HttpHeaders();
@@ -83,13 +81,24 @@ public class DynamicPostTransformFilter
                     // this will prevent exception in case of using non-standard media
                     // types like "Content-Type: image"
                     httpHeaders.add(HttpHeaders.CONTENT_TYPE, originalResponseContentType);
-
                     ClientResponse clientResponse = prepareClientResponse(body, httpHeaders);
 
                     // TODO: flux or mono
-                    Mono modifiedBody = extractBody(exchange, clientResponse, inClass)
-                            .flatMap(originalBody -> Mono.just(applyTransform((String) originalBody, config))
-                                    .switchIfEmpty(Mono.empty()));
+                    Mono<JsonRoot> modifiedBody = extractBody(exchange, clientResponse, inClass)
+                            .flatMap(originalBody -> {
+                                JsonRoot jsonHeadersObject = null;
+                                try {
+                                    jsonHeadersObject = objectMapper.readValue(originalBody, JsonRoot.class);
+                                    System.out.println(jsonHeadersObject);
+                                } catch (JsonProcessingException e) {
+                                    System.out.println("cannot convert to json");
+                                }
+                                if(jsonHeadersObject == null)
+                                    originalBody = jsonHeadersObject.toString();
+                                System.out.println(originalBody);
+                                return Mono.just(jsonHeadersObject)
+                                        .switchIfEmpty(Mono.empty());
+                            });
 
                     BodyInserter bodyInserter = BodyInserters.fromPublisher(modifiedBody, outClass);
                     CachedBodyOutputMessage outputMessage = new CachedBodyOutputMessage(exchange,
@@ -168,27 +177,34 @@ public class DynamicPostTransformFilter
         }, NettyWriteResponseFilter.WRITE_RESPONSE_FILTER_ORDER - 1);
     }
 
-    private static String toRaw(Flux<DataBuffer> body) {
-        AtomicReference<String> rawRef = new AtomicReference<>();
-        body.subscribe(buffer -> {
-            byte[] bytes = new byte[buffer.readableByteCount()];
-            buffer.read(bytes);
-            DataBufferUtils.release(buffer);
-            rawRef.set(Strings.fromUTF8ByteArray(bytes));
-        });
-        return rawRef.get();
-    }
-
-    @Override
-    public String name() {
-        return "DynamicPostTransform";
-    }
-
-    @Override
-    public Config newConfig() {
-        return new Config();
-    }
 
     public static class Config {
+        private String baseMessage;
+        private boolean preLogger;
+        private boolean postLogger;
+
+        public String getBaseMessage() {
+            return baseMessage;
+        }
+
+        public void setBaseMessage(String baseMessage) {
+            this.baseMessage = baseMessage;
+        }
+
+        public boolean isPreLogger() {
+            return preLogger;
+        }
+
+        public void setPreLogger(boolean preLogger) {
+            this.preLogger = preLogger;
+        }
+
+        public boolean isPostLogger() {
+            return postLogger;
+        }
+
+        public void setPostLogger(boolean postLogger) {
+            this.postLogger = postLogger;
+        }
     }
 }

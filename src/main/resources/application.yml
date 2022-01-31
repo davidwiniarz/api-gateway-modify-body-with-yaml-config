@@ -11,7 +11,7 @@ spring:
             - Path=/get/**
             - Method=GET
           filters:
-            - MyFilter2
+            - ModifyResponseFilter
             - RewritePath=/get(?<segment>/?.*), $\{segment}
       default-filters:
         - AddResponseHeader=X-Response, ITS-OK2

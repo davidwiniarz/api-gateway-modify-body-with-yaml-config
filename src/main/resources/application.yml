@@ -1,0 +1,28 @@
+server:
+  port: 8080
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: httpBinModule
+          uri: http://httpbin.org/
+          predicates:
+            - Path=/get/**
+            - Method=GET
+          filters:
+            - MyFilter2
+            - RewritePath=/get(?<segment>/?.*), $\{segment}
+      default-filters:
+        - AddResponseHeader=X-Response, ITS-OK2
+
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    org.springframework.http.server.reactive: INFO
+    org.springframework.web.reactive: INFO
+    org.springframework: INFO
+    pl.santander: INFO
+
+management.endpoints.web.exposure.include: '*'

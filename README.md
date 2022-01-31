@@ -1,4 +1,4 @@
-# api-gateway-modify-body-with-yaml-config
+# SPRING CLOUD GATEWAY - MODIFY RESPONSE WITH YAML CONFIGURATION (no JAVA DSL)
 
 Spring Cloud Gateway with YAML config and modify body with filters.
 
